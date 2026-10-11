@@ -1,0 +1,17 @@
+# Entorno virtual
+.venv/
+venv/
+
+# Variables de entorno y API keys
+.env
+
+# Cachés de Python
+__pycache__/
+*.py[cod]
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Archivos del sistema
+.DS_Store
+Thumbs.db
