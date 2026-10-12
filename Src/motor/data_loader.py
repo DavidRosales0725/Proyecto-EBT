@@ -19,6 +19,10 @@ from __future__ import annotations
 
 import pandas as pd
 import numpy as np
+try:  # paquete normal de la aplicación
+    from motor.team_names import normalizar_nombre_equipo
+except ModuleNotFoundError:  # compatibilidad con importación directa en scripts/tests
+    from team_names import normalizar_nombre_equipo
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List
 
@@ -217,8 +221,8 @@ def estandarizar(df: pd.DataFrame, mapeo: Dict[str, str]) -> pd.DataFrame:
     interno = pd.DataFrame()
 
     interno["fecha"] = _parsear_fechas(df[mapeo["fecha"]])
-    interno["equipo_local"] = df[mapeo["equipo_local"]].astype(str).str.strip()
-    interno["equipo_visitante"] = df[mapeo["equipo_visitante"]].astype(str).str.strip()
+    interno["equipo_local"] = df[mapeo["equipo_local"]].map(normalizar_nombre_equipo)
+    interno["equipo_visitante"] = df[mapeo["equipo_visitante"]].map(normalizar_nombre_equipo)
     interno["goles_local"] = pd.to_numeric(df[mapeo["goles_local"]], errors="coerce")
     interno["goles_visitante"] = pd.to_numeric(df[mapeo["goles_visitante"]], errors="coerce")
 

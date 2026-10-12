@@ -123,11 +123,15 @@ class IndiceHistorico:
 
     @staticmethod
     def _validar_orden(df: pd.DataFrame) -> None:
-        if "fecha" not in df.columns:
+        requeridas = {"fecha", "equipo_local", "equipo_visitante", "goles_local", "goles_visitante", "liga", "temporada"}
+        faltantes = requeridas.difference(df.columns)
+        if faltantes:
             raise ErrorDataFrameNoOrdenado(
-                "El DataFrame no tiene columna 'fecha'. Se espera el formato "
-                "interno producido por data_loader.cargar_datos()."
+                "Faltan columnas requeridas para el histórico: "
+                f"{sorted(faltantes)}. Se espera el formato interno producido por data_loader.cargar_datos()."
             )
+        if df["fecha"].isna().any():
+            raise ErrorDataFrameNoOrdenado("Hay fechas vacías; limpia el CSV con data_loader.cargar_datos() antes de crear el índice.")
         if not df["fecha"].is_monotonic_increasing:
             raise ErrorDataFrameNoOrdenado(
                 "El DataFrame de partidos no está ordenado cronológicamente. "

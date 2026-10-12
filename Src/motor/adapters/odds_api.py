@@ -2,7 +2,7 @@ import os
 
 import requests
 from dotenv import load_dotenv
-from motor.adapters.football_data import traducir_equipo
+from motor.team_names import normalizar_nombre_equipo, equipos_equivalentes
 
 
 load_dotenv()
@@ -127,17 +127,59 @@ def buscar_partido(
 
     for partido in partidos:
 
-        local_api = traducir_equipo(partido["home_team"])
-        visitante_api = traducir_equipo(partido["away_team"])
+        local_api = normalizar_nombre_equipo(partido.get("home_team", ""))
+        visitante_api = normalizar_nombre_equipo(partido.get("away_team", ""))
 
         print(f"API: {local_api} vs {visitante_api}")
 
         if (
-            local_api == equipo_local
-            and visitante_api == equipo_visitante
+            equipos_equivalentes(local_api, equipo_local)
+            and equipos_equivalentes(visitante_api, equipo_visitante)
         ):
             print("✅ ENCONTRADO")
             return partido
 
     print("❌ NO ENCONTRADO")
     return None
+
+
+def consultar_cuotas_partido(
+    equipo_local: str,
+    equipo_visitante: str,
+) -> dict:
+    """Consulta cuotas y devuelve un estado explícito si no están disponibles."""
+    try:
+        datos_api = obtener_cuotas_epl()
+        if not datos_api:
+            return {
+                "estado": "cuota_no_disponible",
+                "cuotas": None,
+                "mensaje": "La API no devolvió eventos con cuotas.",
+            }
+
+        partidos = normalizar_cuotas_epl(datos_api)
+        partido = buscar_partido(partidos, equipo_local, equipo_visitante)
+        if partido is None:
+            return {
+                "estado": "cuota_no_disponible",
+                "cuotas": None,
+                "mensaje": "No hay cuotas disponibles para este partido.",
+            }
+
+        hay_precios = any(partido["h2h"].values()) or any(
+            partido["totals_2_5"].values()
+        )
+        if not hay_precios:
+            return {
+                "estado": "cuota_no_disponible",
+                "cuotas": None,
+                "mensaje": "El evento está disponible, pero no tiene precios publicados.",
+            }
+
+        return {"estado": "disponible", "cuotas": partido, "mensaje": None}
+    except (requests.RequestException, ValueError, RuntimeError, KeyError, TypeError) as exc:
+        return {
+            "estado": "error_api",
+            "cuotas": None,
+            "mensaje": f"No fue posible consultar las cuotas: {exc}",
+        }

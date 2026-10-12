@@ -2,6 +2,7 @@ import os
 
 import requests
 from dotenv import load_dotenv
+from motor.team_names import normalizar_nombre_equipo
 
 load_dotenv()
 
@@ -81,4 +82,4 @@ TRADUCCION_EQUIPOS = {
 }
 
 def traducir_equipo(nombre: str) -> str:
-    return TRADUCCION_EQUIPOS.get(nombre, nombre)
+    return normalizar_nombre_equipo(nombre)

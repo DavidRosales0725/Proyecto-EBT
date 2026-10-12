@@ -6,7 +6,7 @@ de visitante. Cada equipo se analiza únicamente en su rol correspondiente.
 """
 from dataclasses import dataclass
 from typing import List
-from .pesos import promedio_ponderado
+from .pesos import promedio_ponderado, DEFAULT_ALPHA
 
 
 @dataclass
@@ -40,7 +40,7 @@ def promedio_referencia(historico_local: List[ResultadoPartido],
 
 
 def calcular_fuerza(historico: List[ResultadoPartido], promedio_ref: float,
-                     alpha: float = 0.90) -> FuerzaEquipo:
+                     alpha: float = DEFAULT_ALPHA) -> FuerzaEquipo:
     """
     Calcula la fuerza ofensiva y defensiva de un equipo en un rol específico
     (ya sea SOLO como local o SOLO como visitante).
@@ -51,6 +51,10 @@ def calcular_fuerza(historico: List[ResultadoPartido], promedio_ref: float,
     ataque = promedio_ponderado(goles_favor, alpha)
     defensa = promedio_ponderado(goles_contra, alpha)
 
+    if not historico:
+        # Un histórico vacío no aporta información: fuerza neutral.
+        return FuerzaEquipo(ataque=promedio_ref, defensa=promedio_ref,
+                            ataque_relativo=1.0, defensa_relativa=1.0)
     ataque_rel = ataque / promedio_ref if promedio_ref > 0 else 1.0
     defensa_rel = defensa / promedio_ref if promedio_ref > 0 else 1.0
 

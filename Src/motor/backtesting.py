@@ -38,6 +38,7 @@ from core.poisson_model import calcular_probabilidades
 from core.dixon_coles import calcular_probabilidades_dc
 from decision.value_bet import evaluar_value_bet, overround
 from core import metrics as core_metrics
+from core.pesos import DEFAULT_ALPHA
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +110,9 @@ def _extraer_probabilidad(probs, nombre_mercado: str) -> float:
 
 @dataclass
 class ConfiguracionBacktesting:
-    alpha: float = 0.90
+    # Decaimiento por partido (vida media ~6.6 partidos con alpha=0.90).
+    # Usar evaluación cronológica para recalibrar por competición.
+    alpha: float = DEFAULT_ALPHA
     n_partidos: int = N_HISTORICO_RECOMENDADO
     n_minimo: int = N_HISTORICO_MINIMO
     cruzar_temporadas: bool = CRUZAR_TEMPORADAS_DEFAULT
@@ -142,7 +145,7 @@ def _validar_configuracion(config: ConfiguracionBacktesting) -> None:
         raise ErrorConfiguracionInvalida("n_partidos y n_minimo deben ser positivos")
     if config.n_minimo > config.n_partidos:
         raise ErrorConfiguracionInvalida("n_minimo no puede ser mayor que n_partidos")
-    if not (0.0 < config.alpha <= 1.0):
+    if not np.isfinite(config.alpha) or not (0.0 < config.alpha <= 1.0):
         raise ErrorConfiguracionInvalida("alpha debe estar en el rango (0, 1]")
     if config.stake <= 0:
         raise ErrorConfiguracionInvalida("stake debe ser positivo")
