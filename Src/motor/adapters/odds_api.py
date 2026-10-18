@@ -1,8 +1,13 @@
 import os
+import hashlib
 
 import requests
 from dotenv import load_dotenv
 from motor.team_names import normalizar_nombre_equipo, equipos_equivalentes
+try:
+    import streamlit as st
+except ModuleNotFoundError:  # el adaptador también puede usarse desde scripts
+    st = None
 
 
 load_dotenv()
@@ -12,21 +17,11 @@ ODDS_API_URL = (
 )
 
 
-def obtener_cuotas_epl(
-    regiones: str = "uk",
-    mercados: str = "h2h,totals",
-) -> list[dict]:
-    """Obtiene las cuotas actuales de Premier League."""
-
-    api_key = os.getenv("THE_ODDS_API_KEY")
-
-    if not api_key:
-        raise RuntimeError(
-            "No se encontró THE_ODDS_API_KEY en el entorno."
-        )
-
+def _consultar_cuotas_api(regiones: str, mercados: str, _api_key: str,
+                          api_key_fingerprint: str) -> list[dict]:
+    """Consulta cacheable; las excepciones de red no se almacenan."""
     params = {
-        "apiKey": api_key,
+        "apiKey": _api_key,
         "regions": regiones,
         "markets": mercados,
         "oddsFormat": "decimal",
@@ -41,6 +36,24 @@ def obtener_cuotas_epl(
     respuesta.raise_for_status()
 
     return respuesta.json()
+
+
+_consultar_cuotas_cacheado = (
+    st.cache_data(ttl=300, show_spinner=False)(_consultar_cuotas_api)
+    if st is not None else _consultar_cuotas_api
+)
+
+
+def obtener_cuotas_epl(
+    regiones: str = "uk",
+    mercados: str = "h2h,totals",
+) -> list[dict]:
+    """Obtiene cuotas de EPL; refresca cada 5 minutos y no cachea errores."""
+    api_key = os.getenv("THE_ODDS_API_KEY")
+    if not api_key:
+        raise RuntimeError("No se encontró THE_ODDS_API_KEY en el entorno.")
+    clave_api = hashlib.sha256(api_key.encode("utf-8")).hexdigest()
+    return _consultar_cuotas_cacheado(regiones, mercados, api_key, clave_api)
 
 
 def normalizar_cuotas_epl(

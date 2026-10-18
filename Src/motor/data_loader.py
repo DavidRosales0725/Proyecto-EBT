@@ -19,6 +19,11 @@ from __future__ import annotations
 
 import pandas as pd
 import numpy as np
+from pathlib import Path
+try:
+    import streamlit as st
+except ModuleNotFoundError:  # permite reutilizar el cargador fuera de la app
+    st = None
 try:  # paquete normal de la aplicación
     from motor.team_names import normalizar_nombre_equipo
 except ModuleNotFoundError:  # compatibilidad con importación directa en scripts/tests
@@ -402,9 +407,28 @@ def cargar_datos(ruta_csv: str,
         .df_descartados   -> filas descartadas con motivo
         .resumen          -> objeto ResumenCarga
     """
+    ruta = Path(ruta_csv).expanduser().resolve()
+    stat = ruta.stat()
+    # La metadata forma parte de la clave, así los cambios de contenido
+    # invalidan automáticamente el resultado sin releer el archivo entero.
+    firma_archivo = (stat.st_mtime_ns, stat.st_size)
+    resultado = _cargar_datos_cacheado(
+        str(ruta), encoding, tuple(sorted((mapeo_personalizado or {}).items())),
+        firma_archivo,
+    )
+    if imprimir_resumen:
+        resultado.resumen.imprimir()
+    return resultado
+
+
+def _cargar_datos_sin_cache(ruta_csv: str, encoding: str,
+                            mapeo_items: tuple[tuple[str, str], ...],
+                            firma_archivo: tuple[int, int]) -> DatosPreparados:
+    """Carga/limpia un CSV; si falla, la excepción no se almacena en caché."""
+    del firma_archivo  # solo se usa como clave de invalidación del caché
     df_crudo = pd.read_csv(ruta_csv, encoding=encoding)
 
-    mapeo = detectar_columnas(df_crudo, mapeo_personalizado)
+    mapeo = detectar_columnas(df_crudo, dict(mapeo_items) or None)
     validar_columnas(mapeo, columnas_disponibles=list(df_crudo.columns))
 
     faltantes_originales = detectar_faltantes_originales(df_crudo, mapeo)
@@ -415,7 +439,10 @@ def cargar_datos(ruta_csv: str,
 
     resumen = generar_resumen(df_validos, df_descartados, mapeo, faltantes_originales)
 
-    if imprimir_resumen:
-        resumen.imprimir()
-
     return DatosPreparados(df=df_validos, df_descartados=df_descartados, resumen=resumen)
+
+
+if st is not None:
+    _cargar_datos_cacheado = st.cache_data(ttl=3600, show_spinner=False)(_cargar_datos_sin_cache)
+else:
+    _cargar_datos_cacheado = _cargar_datos_sin_cache

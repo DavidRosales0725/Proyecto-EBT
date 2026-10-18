@@ -1,28 +1,23 @@
 import os
+import hashlib
 
 import requests
 from dotenv import load_dotenv
 from motor.team_names import normalizar_nombre_equipo
+try:
+    import streamlit as st
+except ModuleNotFoundError:
+    st = None
 
 load_dotenv()
 
 BASE_URL = "https://api.football-data.org/v4"
 
 
-def obtener_partidos_premier():
-    """
-    Obtiene todos los partidos de Premier League.
-    """
-
-    api_key = os.getenv("FOOTBALL_DATA_API_KEY")
-
-    if not api_key:
-        raise RuntimeError(
-            "No se encontró FOOTBALL_DATA_API_KEY."
-        )
-
+def _obtener_partidos_api(_api_key: str, api_key_fingerprint: str):
+    """Consulta cacheable; fallos HTTP/JSON se propagan y no se guardan."""
     headers = {
-        "X-Auth-Token": api_key,
+        "X-Auth-Token": _api_key,
     }
 
     respuesta = requests.get(
@@ -34,6 +29,21 @@ def obtener_partidos_premier():
     respuesta.raise_for_status()
 
     return respuesta.json()
+
+
+_obtener_partidos_cacheado = (
+    st.cache_data(ttl=900, show_spinner=False)(_obtener_partidos_api)
+    if st is not None else _obtener_partidos_api
+)
+
+
+def obtener_partidos_premier():
+    """Obtiene partidos EPL; el caché expira en 15 minutos."""
+    api_key = os.getenv("FOOTBALL_DATA_API_KEY")
+    if not api_key:
+        raise RuntimeError("No se encontró FOOTBALL_DATA_API_KEY.")
+    huella = hashlib.sha256(api_key.encode("utf-8")).hexdigest()
+    return _obtener_partidos_cacheado(api_key, huella)
 
 
 def obtener_proximos_partidos():
