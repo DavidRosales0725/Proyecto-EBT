@@ -6,7 +6,7 @@ import random
 import pandas as pd
 import pytest
 
-from historicos import (
+from motor.historicos import (
     IndiceHistorico, Rol, construir_contexto_partido,
     ErrorDataFrameNoOrdenado, N_HISTORICO_RECOMENDADO, N_HISTORICO_MINIMO,
 )

@@ -3,7 +3,7 @@ import hashlib
 
 import requests
 from dotenv import load_dotenv
-from motor.team_names import normalizar_nombre_equipo
+from ..team_names import normalizar_nombre_equipo
 try:
     import streamlit as st
 except ModuleNotFoundError:

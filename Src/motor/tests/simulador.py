@@ -9,7 +9,7 @@ de únicamente los resultados observados (igual que haría un usuario real).
 import random
 import math
 from dataclasses import dataclass
-from core.fuerzas import ResultadoPartido
+from ..core.fuerzas import ResultadoPartido
 
 
 @dataclass

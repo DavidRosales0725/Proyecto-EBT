@@ -7,15 +7,18 @@ Barrido exhaustivo para responder:
 4. Límites del modelo.
 """
 import sys, random
-sys.path.insert(0, "/home/claude/motor")
+from pathlib import Path
+RUTA_SRC = Path(__file__).resolve().parents[2]
+if str(RUTA_SRC) not in sys.path:
+    sys.path.insert(0, str(RUTA_SRC))
 
-from core.fuerzas import calcular_fuerza, promedio_referencia
-from core.expected_goals import calcular_goles_esperados
-from core.poisson_model import calcular_probabilidades
-from core.dixon_coles import calcular_probabilidades_dc
-from core.metrics import brier_score
-from tests.simulador import (generar_universo_equipos, simular_partido,
-                              simular_partido_correlacionado, generar_historico)
+from motor.core.fuerzas import calcular_fuerza, promedio_referencia
+from motor.core.expected_goals import calcular_goles_esperados
+from motor.core.poisson_model import calcular_probabilidades
+from motor.core.dixon_coles import calcular_probabilidades_dc
+from motor.core.metrics import brier_score
+from motor.tests.simulador import (generar_universo_equipos, simular_partido,
+                                   simular_partido_correlacionado, generar_historico)
 
 PROMEDIO_LIGA = 1.4
 N_EQUIPOS = 30

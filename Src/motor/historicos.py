@@ -24,7 +24,7 @@ from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from motor.tipos_comunes import ResultadoPartido
+from .tipos_comunes import ResultadoPartido
 
 # ---------------------------------------------------------------------------
 # Defaults del módulo. NOTA: cuando exista config.py (aprobado en la revisión

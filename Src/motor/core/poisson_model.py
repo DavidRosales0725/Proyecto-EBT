@@ -4,7 +4,7 @@ Cálculo de probabilidades de mercado vía distribución de Poisson.
 import math
 from dataclasses import dataclass
 from scipy.stats import poisson
-from motor.core.expected_goals import GolesEsperados
+from .expected_goals import GolesEsperados
 
 
 @dataclass

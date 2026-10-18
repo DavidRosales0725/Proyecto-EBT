@@ -9,7 +9,7 @@ ni siquiera aquí, la ponderación por recencia no tendría base real.
 import random
 import math
 from dataclasses import dataclass, field
-from core.fuerzas import ResultadoPartido
+from ..core.fuerzas import ResultadoPartido
 
 
 @dataclass

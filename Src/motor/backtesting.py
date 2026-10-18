@@ -28,17 +28,17 @@ from typing import Callable, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from historicos import (
+from .historicos import (
     IndiceHistorico, construir_contexto_partido, HistoricoEquipo,
     N_HISTORICO_RECOMENDADO, N_HISTORICO_MINIMO, CRUZAR_TEMPORADAS_DEFAULT,
 )
-from core.fuerzas import calcular_fuerza, promedio_referencia
-from core.expected_goals import calcular_goles_esperados, GolesEsperados
-from core.poisson_model import calcular_probabilidades
-from core.dixon_coles import calcular_probabilidades_dc
-from decision.value_bet import evaluar_value_bet, overround
-from core import metrics as core_metrics
-from core.pesos import DEFAULT_ALPHA
+from .core.fuerzas import calcular_fuerza, promedio_referencia
+from .core.expected_goals import calcular_goles_esperados, GolesEsperados
+from .core.poisson_model import calcular_probabilidades
+from .core.dixon_coles import calcular_probabilidades_dc
+from .decision.value_bet import evaluar_value_bet, overround
+from .core import metrics as core_metrics
+from .core.pesos import DEFAULT_ALPHA
 
 
 # ---------------------------------------------------------------------------
@@ -121,8 +121,14 @@ class ConfiguracionBacktesting:
     rho_dixon_coles: float = -0.10
     politica_historico_insuficiente: str = "excluir"  # "excluir" | "incluir_con_advertencia"
     umbral_value: float = 0.0                       # puntos porcentuales
+    # Margen p_modelo - p_implícita en escala 0-1; 0.05 equivale a 5 pp.
+    min_edge: float = 0.05
     casa_cuotas: str = "Average"
     stake: float = 1.0
+    metodo_stake: str = "fijo"  # "fijo" | "kelly_fraccionado"
+    fraccion_kelly: float = 0.25  # 0.25 = cuarto Kelly; 0.50 = medio Kelly
+    stake_max_pct: float = 0.05  # tope de exposición por apuesta sobre bankroll actual
+    bankroll_inicial: float = 100.0
     fecha_inicio_evaluacion: Optional[pd.Timestamp] = None
     fecha_fin_evaluacion: Optional[pd.Timestamp] = None
     semilla_bootstrap: int = 42
@@ -147,8 +153,18 @@ def _validar_configuracion(config: ConfiguracionBacktesting) -> None:
         raise ErrorConfiguracionInvalida("n_minimo no puede ser mayor que n_partidos")
     if not np.isfinite(config.alpha) or not (0.0 < config.alpha <= 1.0):
         raise ErrorConfiguracionInvalida("alpha debe estar en el rango (0, 1]")
-    if config.stake <= 0:
-        raise ErrorConfiguracionInvalida("stake debe ser positivo")
+    if not np.isfinite(config.stake) or config.stake <= 0:
+        raise ErrorConfiguracionInvalida("stake debe ser positivo y finito")
+    if not np.isfinite(config.min_edge) or not (0.0 <= config.min_edge <= 0.20):
+        raise ErrorConfiguracionInvalida("min_edge debe estar entre 0.0 y 0.20 (0% a 20%)")
+    if config.metodo_stake not in {"fijo", "kelly_fraccionado"}:
+        raise ErrorConfiguracionInvalida("metodo_stake debe ser 'fijo' o 'kelly_fraccionado'")
+    if not np.isfinite(config.fraccion_kelly) or not (0.0 < config.fraccion_kelly <= 1.0):
+        raise ErrorConfiguracionInvalida("fraccion_kelly debe estar en el rango (0, 1]")
+    if not np.isfinite(config.stake_max_pct) or not (0.0 < config.stake_max_pct <= 1.0):
+        raise ErrorConfiguracionInvalida("stake_max_pct debe estar en el rango (0, 1]")
+    if not np.isfinite(config.bankroll_inicial) or config.bankroll_inicial <= 0:
+        raise ErrorConfiguracionInvalida("bankroll_inicial debe ser positivo y finito")
 
 
 # ---------------------------------------------------------------------------
@@ -352,9 +368,26 @@ def _calcular_probabilidades_partido(goles_esperados: GolesEsperados,
     return calcular_probabilidades(goles_esperados)
 
 
+def _calcular_stake(probabilidad: float, cuota: float, bankroll: float,
+                    config: ConfiguracionBacktesting) -> float:
+    """Calcula el stake fijo o Kelly fraccionado con tope por apuesta."""
+    if config.metodo_stake == "fijo":
+        return float(config.stake)
+    if bankroll <= 0 or cuota <= 1:
+        return 0.0
+
+    b = cuota - 1.0
+    q = 1.0 - probabilidad
+    kelly_completo = (probabilidad * b - q) / b
+    fraccion_apuesta = max(0.0, kelly_completo) * config.fraccion_kelly
+    fraccion_apuesta = min(fraccion_apuesta, config.stake_max_pct)
+    return float(bankroll * fraccion_apuesta)
+
+
 def _procesar_partido(
     indice: IndiceHistorico, row: pd.Series, config: ConfiguracionBacktesting,
     resolucion_cuotas: Dict[str, Optional[Tuple[str, str, str]]],
+    bankroll_actual: Optional[float] = None,
 ) -> Tuple[List[PrediccionMercado], List[Apuesta], Optional[PartidoExcluido], List[Incidencia]]:
     incidencias_locales: List[Incidencia] = []
 
@@ -388,6 +421,9 @@ def _procesar_partido(
 
     predicciones: List[PrediccionMercado] = []
     apuestas: List[Apuesta] = []
+    # Todas las selecciones del mismo partido se dimensionan sobre el mismo
+    # bankroll previo al partido; sus resultados se liquidan en conjunto.
+    bankroll_para_stake = config.bankroll_inicial if bankroll_actual is None else bankroll_actual
     goles_local, goles_visitante = int(row["goles_local"]), int(row["goles_visitante"])
 
     for nombre_mercado in config.mercados:
@@ -419,26 +455,33 @@ def _procesar_partido(
         if pd.isna(valor_favor):
             continue  # cuota faltante solo en esta fila -- no genera Apuesta, sí PrediccionMercado
 
-        if valor_favor <= 1.0:
+        if not np.isfinite(valor_favor) or valor_favor <= 1.0:
             incidencias_locales.append(Incidencia(
-                "cuota_invalida", f"Cuota <= 1.0 para el mercado '{nombre_mercado}' (columna {col_favor})",
+                "cuota_invalida", f"Cuota no finita o <= 1.0 para el mercado '{nombre_mercado}' (columna {col_favor})",
             ))
             continue
 
         cuota = float(valor_favor)
         resultado_value = evaluar_value_bet(probabilidad, cuota)
 
+        # value_pct está expresado en puntos porcentuales; min_edge usa escala
+        # 0-1 (por ejemplo, 0.05 equivale a cinco puntos porcentuales).
+        edge = resultado_value.value_pct / 100.0
+        if edge < config.min_edge:
+            continue
+
         overround_val = None
         if valor_contra is not None and not pd.isna(valor_contra) and valor_contra > 1.0:
             overround_val = overround(cuota, float(valor_contra))
 
         hay_value = resultado_value.hay_value
-        se_aposto = resultado_value.value_pct >= config.umbral_value
-        ganancia = 0.0
-        stake_usado = 0.0
-        if se_aposto:
-            stake_usado = config.stake
-            ganancia = config.stake * (cuota - 1) if resultado_bool else -config.stake
+        cumple_umbral = resultado_value.value_pct >= config.umbral_value
+        stake_usado = (
+            _calcular_stake(probabilidad, cuota, bankroll_para_stake, config)
+            if cumple_umbral else 0.0
+        )
+        se_aposto = cumple_umbral and stake_usado > 0
+        ganancia = stake_usado * (cuota - 1) if se_aposto and resultado_bool else (-stake_usado if se_aposto else 0.0)
 
         apuesta = Apuesta(
             **asdict(prediccion),
@@ -766,13 +809,22 @@ def ejecutar_backtesting(df_partidos: pd.DataFrame,
     partidos_excluidos: List[PartidoExcluido] = []
     incidencias: List[Incidencia] = list(incidencias_dataset)
 
-    for _, row in df_eval.iterrows():
-        preds, apts, excluido, inc_locales = _procesar_partido(indice, row, config, resolucion_cuotas)
-        registro_predicciones.extend(preds)
-        registro_apuestas.extend(apts)
-        if excluido is not None:
-            partidos_excluidos.append(excluido)
-        incidencias.extend(inc_locales)
+    bankroll_actual = config.bankroll_inicial
+    # Agrupar por fecha impide que el resultado de un partido del mismo día
+    # altere el stake de otro partido sin hora de inicio disponible.
+    for _, partidos_fecha in df_eval.groupby("fecha", sort=True):
+        apuestas_fecha: List[Apuesta] = []
+        for _, row in partidos_fecha.iterrows():
+            preds, apts, excluido, inc_locales = _procesar_partido(
+                indice, row, config, resolucion_cuotas, bankroll_actual
+            )
+            registro_predicciones.extend(preds)
+            registro_apuestas.extend(apts)
+            apuestas_fecha.extend(apts)
+            if excluido is not None:
+                partidos_excluidos.append(excluido)
+            incidencias.extend(inc_locales)
+        bankroll_actual += sum(ap.ganancia for ap in apuestas_fecha if ap.se_aposto)
 
     incidencias = _consolidar_incidencias(incidencias)
     registro_apuestas = _calcular_acumulados(registro_apuestas)

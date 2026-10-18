@@ -22,16 +22,16 @@ from pathlib import Path
 
 RUTA_EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 
-from backtesting import (
+from motor.backtesting import (
     ejecutar_backtesting, ConfiguracionBacktesting, ErrorConfiguracionInvalida,
     MERCADOS_SOPORTADOS, exportar_csv, _calcular_drawdown_rachas,
     _consolidar_incidencias, Incidencia,
 )
-from core.fuerzas import calcular_fuerza, promedio_referencia
-from core.expected_goals import calcular_goles_esperados
-from core.poisson_model import calcular_probabilidades
-from core import metrics as core_metrics
-from data_loader import cargar_datos
+from motor.core.fuerzas import calcular_fuerza, promedio_referencia
+from motor.core.expected_goals import calcular_goles_esperados
+from motor.core.poisson_model import calcular_probabilidades
+from motor.core import metrics as core_metrics
+from motor.data_loader import cargar_datos
 
 
 # ---------------------------------------------------------------------------
@@ -92,7 +92,7 @@ def test_prediccion_no_usa_resultado_real(df_sintetico_con_cuotas):
     una muestra de predicciones ya registradas usando SOLO el histórico
     (sin resultado_real ni cuota) debe dar el mismo valor que el registrado.
     """
-    from historicos import IndiceHistorico, construir_contexto_partido
+    from motor.historicos import IndiceHistorico, construir_contexto_partido
 
     config = ConfiguracionBacktesting(mercados=["over_25"], n_partidos=8, n_minimo=5)
     resultado = ejecutar_backtesting(df_sintetico_con_cuotas, config)
@@ -176,7 +176,7 @@ def test_politica_incluir_con_advertencia_marca_confianza_baja(df_real):
 # ---------------------------------------------------------------------------
 
 def test_prediccion_coincide_con_motor_directo(df_sintetico_con_cuotas):
-    from historicos import IndiceHistorico, construir_contexto_partido
+    from motor.historicos import IndiceHistorico, construir_contexto_partido
 
     config = ConfiguracionBacktesting(mercados=["over_25", "btts_si"], alpha=0.85, n_partidos=8, n_minimo=5)
     resultado = ejecutar_backtesting(df_sintetico_con_cuotas, config)

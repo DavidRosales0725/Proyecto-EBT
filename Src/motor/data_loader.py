@@ -24,10 +24,7 @@ try:
     import streamlit as st
 except ModuleNotFoundError:  # permite reutilizar el cargador fuera de la app
     st = None
-try:  # paquete normal de la aplicación
-    from motor.team_names import normalizar_nombre_equipo
-except ModuleNotFoundError:  # compatibilidad con importación directa en scripts/tests
-    from team_names import normalizar_nombre_equipo
+from .team_names import normalizar_nombre_equipo
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List
 

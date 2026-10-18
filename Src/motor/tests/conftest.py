@@ -11,6 +11,6 @@ import de los módulos del proyecto funcione en ambos escenarios.
 import sys
 from pathlib import Path
 
-RAIZ_PROYECTO = Path(__file__).resolve().parent.parent
-if str(RAIZ_PROYECTO) not in sys.path:
-    sys.path.insert(0, str(RAIZ_PROYECTO))
+RUTA_SRC = Path(__file__).resolve().parents[2]
+if str(RUTA_SRC) not in sys.path:
+    sys.path.insert(0, str(RUTA_SRC))

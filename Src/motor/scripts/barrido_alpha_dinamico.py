@@ -1,12 +1,15 @@
 import sys, random
-sys.path.insert(0, "/home/claude/motor")
+from pathlib import Path
+RUTA_SRC = Path(__file__).resolve().parents[2]
+if str(RUTA_SRC) not in sys.path:
+    sys.path.insert(0, str(RUTA_SRC))
 
-from core.fuerzas import calcular_fuerza, promedio_referencia
-from core.expected_goals import calcular_goles_esperados
-from core.poisson_model import calcular_probabilidades
-from core.metrics import brier_score
-from tests.simulador_dinamico import (generar_universo_dinamico, generar_historico_dinamico,
-                                       jugar_partido_actual)
+from motor.core.fuerzas import calcular_fuerza, promedio_referencia
+from motor.core.expected_goals import calcular_goles_esperados
+from motor.core.poisson_model import calcular_probabilidades
+from motor.core.metrics import brier_score
+from motor.tests.simulador_dinamico import (generar_universo_dinamico, generar_historico_dinamico,
+                                            jugar_partido_actual)
 
 PROMEDIO_LIGA = 1.4
 N_EQUIPOS = 30

@@ -7,7 +7,7 @@ lambda_visitante = FuerzaAtaque_Visitante * FuerzaDefensa_Local * PromedioRefere
 Modelo multiplicativo normalizado (Maher, 1982), no aditivo.
 """
 from dataclasses import dataclass
-from motor.core.fuerzas import FuerzaEquipo
+from .fuerzas import FuerzaEquipo
 
 @dataclass
 class GolesEsperados:
