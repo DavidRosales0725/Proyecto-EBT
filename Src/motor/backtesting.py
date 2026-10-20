@@ -22,8 +22,9 @@ from __future__ import annotations
 import os
 import random
 import dataclasses
+from pathlib import Path
 from dataclasses import dataclass, field, asdict, replace
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -39,6 +40,7 @@ from .core.dixon_coles import calcular_probabilidades_dc
 from .decision.value_bet import evaluar_value_bet, overround
 from .core import metrics as core_metrics
 from .core.pesos import DEFAULT_ALPHA
+from .data_loader import cargar_datos
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +287,15 @@ class ResultadoBacktesting:
     incidencias: List[Incidencia]
     metricas: MetricasBacktesting
     configuracion_usada: ConfiguracionBacktesting
+
+
+@dataclass
+class ResultadoComparativoBacktesting:
+    """Resultados individuales y resumen agregado por liga."""
+    resultados_por_liga: Dict[str, ResultadoBacktesting]
+    resumen_comparativo: pd.DataFrame
+    configuracion_usada: ConfiguracionBacktesting
+    errores_fuente: List[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -839,6 +850,118 @@ def ejecutar_backtesting(df_partidos: pd.DataFrame,
         incidencias=incidencias,
         metricas=metricas,
         configuracion_usada=config,
+    )
+
+
+def ejecutar_backtesting_multiliga(
+    fuentes: Union[str, Path, Iterable[Union[str, Path]]],
+    configuracion: Optional[ConfiguracionBacktesting] = None,
+) -> ResultadoComparativoBacktesting:
+    """Ejecuta el backtesting para CSVs, una lista de rutas o un directorio.
+
+    Los archivos que contienen la misma etiqueta de liga se combinan antes
+    de evaluar para permitir comparar una competición usando varias temporadas.
+    Filas repetidas para el mismo partido se conservan una sola vez.
+    """
+    config = configuracion or ConfiguracionBacktesting()
+    _validar_configuracion(config)
+
+    if isinstance(fuentes, (str, Path)):
+        entradas = [fuentes]
+    else:
+        entradas = list(fuentes)
+
+    archivos: List[Path] = []
+    errores: List[str] = []
+    for entrada in entradas:
+        ruta = Path(entrada).expanduser()
+        if ruta.is_dir():
+            encontrados = sorted(ruta.rglob("*.csv"))
+            if not encontrados:
+                errores.append(f"No se encontraron CSV en el directorio: {ruta}")
+            archivos.extend(encontrados)
+        elif ruta.is_file() and ruta.suffix.lower() == ".csv":
+            archivos.append(ruta)
+        else:
+            errores.append(f"No se encontró un archivo CSV válido: {ruta}")
+
+    # Elimina rutas repetidas sin alterar el orden estable de lectura.
+    archivos_unicos: List[Path] = []
+    vistas = set()
+    for archivo in archivos:
+        clave = str(archivo.resolve()).casefold()
+        if clave not in vistas:
+            vistas.add(clave)
+            archivos_unicos.append(archivo)
+
+    por_liga: Dict[str, List[pd.DataFrame]] = {}
+    for archivo in archivos_unicos:
+        try:
+            datos = cargar_datos(str(archivo), imprimir_resumen=False)
+        except Exception as exc:
+            errores.append(f"{archivo.name}: {exc}")
+            continue
+        if datos.df.empty:
+            errores.append(f"{archivo.name}: no contiene partidos válidos.")
+            continue
+
+        df = datos.df.copy()
+        liga_fallback = archivo.parent.name or archivo.stem
+        etiquetas = df["liga"].fillna("").astype(str).str.strip()
+        etiquetas = etiquetas.where(~etiquetas.str.upper().isin({"", "SIN_LIGA", "NAN", "NONE"}), liga_fallback)
+        # Cuando el CSV solo trae un código de proveedor (p. ej. E0), el
+        # nombre de la carpeta de Data/raw suele ser el nombre legible de liga.
+        ligas_csv = etiquetas.unique().tolist()
+        if len(ligas_csv) == 1 and archivo.parent.name.casefold() not in {"raw", "data"}:
+            etiquetas[:] = liga_fallback
+        df["liga"] = etiquetas
+        for liga, grupo in df.groupby("liga", sort=True, dropna=False):
+            clave_liga = str(liga).strip() or liga_fallback
+            por_liga.setdefault(clave_liga, []).append(grupo.copy())
+
+    resultados: Dict[str, ResultadoBacktesting] = {}
+    filas_resumen: List[dict] = []
+    for liga in sorted(por_liga):
+        df_liga = pd.concat(por_liga[liga], ignore_index=True)
+        df_liga = df_liga.drop_duplicates(
+            subset=["fecha", "equipo_local", "equipo_visitante"], keep="first"
+        ).sort_values("fecha").reset_index(drop=True)
+        try:
+            resultado = ejecutar_backtesting(df_liga, config)
+        except Exception as exc:
+            errores.append(f"Liga {liga}: no se pudo ejecutar el backtesting: {exc}")
+            continue
+
+        resultados[liga] = resultado
+        metricas = resultado.metricas.agregado_global
+        apuestas_ejecutadas = [a for a in resultado.registro_apuestas if a.se_aposto]
+        aciertos = (
+            sum(a.resultado_real == 1 for a in apuestas_ejecutadas) / len(apuestas_ejecutadas) * 100
+            if apuestas_ejecutadas else None
+        )
+        beneficio = sum(a.ganancia for a in apuestas_ejecutadas)
+        filas_resumen.append({
+            "Liga": liga,
+            "Partidos evaluados": resultado.resumen_general.n_partidos_evaluados,
+            "Apuestas": len(apuestas_ejecutadas),
+            "Aciertos (%)": aciertos,
+            "Yield (%)": metricas.yield_pct,
+            "ROI (%)": metricas.roi,
+            "Beneficio": beneficio,
+            "Bankroll final": config.bankroll_inicial + beneficio,
+            "Máximo drawdown": metricas.drawdown_maximo,
+        })
+
+    columnas = [
+        "Liga", "Partidos evaluados", "Apuestas", "Aciertos (%)", "Yield (%)",
+        "ROI (%)", "Beneficio", "Bankroll final", "Máximo drawdown",
+    ]
+    resumen = pd.DataFrame(filas_resumen, columns=columnas)
+    return ResultadoComparativoBacktesting(
+        resultados_por_liga=resultados,
+        resumen_comparativo=resumen,
+        configuracion_usada=config,
+        errores_fuente=errores,
     )
 
 
