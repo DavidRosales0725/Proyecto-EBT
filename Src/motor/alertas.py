@@ -7,7 +7,7 @@ su reutilización desde otras interfaces o scripts.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -108,8 +108,10 @@ def calcular_alertas_value_bets(
     def fecha_local_partido(partido: dict) -> Optional[str]:
         try:
             marca = pd.Timestamp(partido["fecha"])
+            # En CSV los históricos suelen tener fechas sin zona; se conserva
+            # su día calendario. Las fuentes API sí entregan timestamps UTC.
             if marca.tzinfo is None:
-                marca = marca.tz_localize("UTC")
+                return marca.date().isoformat()
             return marca.tz_convert(ZONA_HORARIA_ALERTAS).date().isoformat()
         except (KeyError, TypeError, ValueError):
             return None
@@ -196,12 +198,12 @@ def calcular_alertas_value_bets(
 
 def generar_boletin_jornada(
     directorio_datos: str | Path,
-    fecha: Optional[datetime] = None,
+    fecha: Optional[date | datetime] = None,
     **parametros,
 ) -> ResultadoBoletinJornada:
     """Consulta fixtures/cuotas actuales y genera alertas para el día local."""
     zona = ZoneInfo(ZONA_HORARIA_ALERTAS)
-    fecha_local = (fecha or datetime.now(zona)).astimezone(zona).date().isoformat()
+    fecha_local = _fecha_iso_local(fecha, zona)
     ruta_liga = Path(directorio_datos) / LIGA_ALERTAS
     archivos = sorted(ruta_liga.glob("*.csv")) if ruta_liga.exists() else []
     if not archivos:
@@ -222,17 +224,9 @@ def generar_boletin_jornada(
             subset=["fecha", "equipo_local", "equipo_visitante"], keep="last"
         ).sort_values("fecha").reset_index(drop=True)
 
-    try:
-        respuesta_calendario = obtener_partidos_premier()
-        partidos = [
-            {"local": m["homeTeam"]["name"], "visitante": m["awayTeam"]["name"], "fecha": m["utcDate"]}
-            for m in respuesta_calendario.get("matches", [])
-            if m.get("status") in {"SCHEDULED", "TIMED"}
-            and m.get("homeTeam", {}).get("name") and m.get("awayTeam", {}).get("name")
-        ]
-    except Exception as exc:
-        partidos = []
-        avisos.append(f"No fue posible obtener el calendario: {exc}")
+    partidos, error_calendario = consultar_partidos_jornada(fecha_local)
+    if error_calendario:
+        avisos.append(error_calendario)
     try:
         cuotas = normalizar_cuotas_epl(obtener_cuotas_epl())
     except Exception as exc:
@@ -242,6 +236,115 @@ def generar_boletin_jornada(
     resultado = calcular_alertas_value_bets(partidos, cuotas, historico, fecha_local, **parametros)
     resultado.avisos = avisos + resultado.avisos
     return resultado
+
+
+def _fecha_iso_local(fecha: Optional[date | datetime], zona: ZoneInfo) -> str:
+    if fecha is None:
+        return datetime.now(zona).date().isoformat()
+    if isinstance(fecha, datetime):
+        if fecha.tzinfo is None:
+            fecha = fecha.replace(tzinfo=zona)
+        return fecha.astimezone(zona).date().isoformat()
+    return fecha.isoformat()
+
+
+def consultar_partidos_jornada(fecha: Optional[date | datetime] = None) -> tuple[list[dict], Optional[str]]:
+    """Devuelve los fixtures EPL programados en la fecha local indicada."""
+    fecha_local = _fecha_iso_local(fecha, ZoneInfo(ZONA_HORARIA_ALERTAS))
+    try:
+        respuesta = obtener_partidos_premier()
+        partidos = [
+            {"local": partido["homeTeam"]["name"],
+             "visitante": partido["awayTeam"]["name"],
+             "fecha": partido["utcDate"], "estado": partido.get("status", "")}
+            for partido in respuesta.get("matches", [])
+            if partido.get("status") in {"SCHEDULED", "TIMED"}
+            and partido.get("homeTeam", {}).get("name")
+            and partido.get("awayTeam", {}).get("name")
+        ]
+        partidos = [p for p in partidos if _fecha_fixture_local(p.get("fecha")) == fecha_local]
+        return partidos, None
+    except Exception as exc:
+        return [], f"No fue posible obtener el calendario: {exc}"
+
+
+def _fecha_fixture_local(valor: object) -> Optional[str]:
+    try:
+        marca = pd.Timestamp(valor)
+        if marca.tzinfo is None:
+            marca = marca.tz_localize("UTC")
+        return marca.tz_convert(ZONA_HORARIA_ALERTAS).date().isoformat()
+    except (TypeError, ValueError):
+        return None
+
+
+def generar_boletin_ejemplo(
+    directorio_datos: str | Path,
+    fecha_boletin: Optional[date | datetime] = None,
+    **parametros,
+) -> ResultadoBoletinJornada:
+    """Genera una demostración con fixture y cuotas reales guardados en CSV.
+
+    El partido conserva su fecha histórica y el boletín indica que es una
+    demostración; nunca presenta esos precios como cuotas actuales.
+    """
+    zona = ZoneInfo(ZONA_HORARIA_ALERTAS)
+    fecha_seleccionada = _fecha_iso_local(fecha_boletin, zona)
+    ruta_liga = Path(directorio_datos) / LIGA_ALERTAS
+    frames = []
+    avisos = []
+    for archivo in sorted(ruta_liga.glob("*.csv")) if ruta_liga.exists() else []:
+        try:
+            datos = cargar_datos(str(archivo), imprimir_resumen=False)
+            if not datos.df.empty:
+                frames.append(datos.df)
+        except Exception as exc:
+            avisos.append(f"No se pudo cargar {archivo.name}: {exc}")
+    if not frames:
+        return ResultadoBoletinJornada(fecha_seleccionada, pd.DataFrame(), avisos + ["No hay históricos disponibles para crear el ejemplo."])
+
+    historico = pd.concat(frames, ignore_index=True).drop_duplicates(
+        subset=["fecha", "equipo_local", "equipo_visitante"], keep="last"
+    ).sort_values("fecha").reset_index(drop=True)
+    mapa_cuotas = {
+        "Local": ("AvgH", "MaxH", "B365H"),
+        "Empate": ("AvgD", "MaxD", "B365D"),
+        "Visitante": ("AvgA", "MaxA", "B365A"),
+        "Over 2.5": ("Avg>2.5", "Max>2.5", "B365>2.5"),
+        "Under 2.5": ("Avg<2.5", "Max<2.5", "B365<2.5"),
+    }
+
+    for fila in reversed(list(historico.to_dict("records"))):
+        odds = {}
+        for mercado, candidatas in mapa_cuotas.items():
+            cuota = next((fila.get(col) for col in candidatas
+                          if fila.get(col) is not None and not pd.isna(fila.get(col))
+                          and pd.to_numeric(fila.get(col), errors="coerce") > 1), None)
+            odds[mercado] = float(cuota) if cuota is not None else None
+        if not any(valor is not None for valor in odds.values()):
+            continue
+        partido = {"local": fila["equipo_local"], "visitante": fila["equipo_visitante"], "fecha": fila["fecha"]}
+        evento_cuotas = {
+            "home_team": partido["local"], "away_team": partido["visitante"],
+            "h2h": {partido["local"]: odds["Local"], "Draw": odds["Empate"], partido["visitante"]: odds["Visitante"]},
+            "totals_2_5": {"Over": odds["Over 2.5"], "Under": odds["Under 2.5"]},
+        }
+        fecha_fixture = pd.Timestamp(fila["fecha"]).date().isoformat()
+        resultado = calcular_alertas_value_bets(
+            [partido], [evento_cuotas], historico, fecha_fixture, **parametros
+        )
+        if not resultado.apuestas.empty:
+            resultado.fecha = fecha_seleccionada
+            resultado.avisos = avisos + [
+                f"Modo de demostración: fixture histórico del {fecha_fixture}; se usan cuotas reales archivadas en el CSV, no cuotas en vivo."
+            ]
+            return resultado
+
+    return ResultadoBoletinJornada(
+        fecha_seleccionada, pd.DataFrame(), avisos + [
+            "No se encontró en los CSV un fixture con cuotas y Value Bets que supere el Edge mínimo seleccionado."
+        ]
+    )
 
 
 def boletin_markdown(resultado: ResultadoBoletinJornada, min_edge: float = 0.05) -> str:
@@ -256,7 +359,12 @@ def boletin_markdown(resultado: ResultadoBoletinJornada, min_edge: float = 0.05)
         tabla["Cuota"] = tabla["Cuota"].map(lambda x: f"{x:.2f}")
         tabla["Stake sugerido (u)"] = tabla["Stake sugerido (u)"].map(lambda x: f"{x:.2f} u")
         if "Fecha" in tabla:
-            tabla["Fecha"] = pd.to_datetime(tabla["Fecha"]).dt.strftime("%H:%M UTC")
+            def formatear_fecha(valor) -> str:
+                marca = pd.Timestamp(valor)
+                if marca.tzinfo is None:
+                    return marca.strftime("%Y-%m-%d")
+                return marca.tz_convert("UTC").strftime("%Y-%m-%d %H:%M UTC")
+            tabla["Fecha"] = tabla["Fecha"].map(formatear_fecha)
         columnas = list(tabla.columns)
         lineas.append("| " + " | ".join(columnas) + " |")
         lineas.append("| " + " | ".join(["---"] * len(columnas)) + " |")
