@@ -5,14 +5,14 @@ import unicodedata
 
 _ALIAS_GROUPS = {
     "Arsenal": ["Arsenal FC"], "Chelsea": ["Chelsea FC"], "Liverpool": ["Liverpool FC"],
-    "Manchester City": ["Manchester City FC"], "Manchester United": ["Manchester United FC"],
+    "Manchester City": ["Manchester City FC", "Man City"], "Manchester United": ["Manchester United FC", "Man United", "Man Utd"],
     "Tottenham": ["Tottenham Hotspur", "Tottenham Hotspur FC"],
     "Newcastle": ["Newcastle United", "Newcastle United FC"],
     "Brighton": ["Brighton & Hove Albion", "Brighton & Hove Albion FC"],
     "Crystal Palace": ["Crystal Palace FC"], "Everton": ["Everton FC"], "Fulham": ["Fulham FC"],
     "Aston Villa": ["Aston Villa FC"], "Brentford": ["Brentford FC"],
     "Bournemouth": ["AFC Bournemouth", "AFC Bournemouth FC"],
-    "Nottingham Forest": ["Nottingham Forest FC"], "Leeds": ["Leeds United", "Leeds United FC"],
+    "Nottingham Forest": ["Nottingham Forest FC", "Nott'm Forest", "Nottm Forest"], "Leeds": ["Leeds United", "Leeds United FC"],
     "Sunderland": ["Sunderland AFC"], "Burnley": ["Burnley FC"],
     "Hull": ["Hull City", "Hull City AFC"], "Coventry": ["Coventry City", "Coventry City FC"],
     "Ipswich": ["Ipswich Town", "Ipswich Town FC"],
