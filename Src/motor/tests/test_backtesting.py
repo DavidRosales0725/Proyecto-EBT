@@ -419,7 +419,10 @@ def test_exportacion_csv_reproducible(df_sintetico_con_cuotas, tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_integracion_temporada_real_E0(df_real):
-    resultado = ejecutar_backtesting(df_real, ConfiguracionBacktesting())
+    # Esta integración comprueba que el filtro de edge configurado se aplique
+    # a los partidos evaluables con cuotas reales.
+    config = ConfiguracionBacktesting()
+    resultado = ejecutar_backtesting(df_real, config)
 
     # Dato de referencia ya medido de forma independiente con historicos.py
     assert resultado.resumen_general.n_partidos_evaluados == 176
@@ -433,9 +436,11 @@ def test_integracion_temporada_real_E0(df_real):
         assert 0.0 <= p.probabilidad_sistema <= 1.0
         assert p.resultado_real in (0, 1)
 
-    # over_25 es el único mercado con cuotas reales disponibles en este CSV
-    assert len(resultado.registro_apuestas) == 176
+    # over_25 es el único mercado con cuotas reales disponibles en este CSV;
+    # solo se registran oportunidades que superan el edge mínimo.
+    assert 0 < len(resultado.registro_apuestas) < 176
     assert all(a.mercado == "over_25" for a in resultado.registro_apuestas)
+    assert all(a.value_pct / 100 >= config.min_edge for a in resultado.registro_apuestas)
 
 
 if __name__ == "__main__":
