@@ -1,5 +1,5 @@
 import streamlit as st
 
-st.title("📚 Históricos")
-
-st.write("Aquí se visualizarán las temporadas cargadas.")
+st.set_page_config(page_title="EBT · Vista desactivada", page_icon="⚽", layout="wide")
+st.title("Históricos")
+st.info("Esta vista se desactivó durante la simplificación de EBT. Usa la Prediction Card de la página principal para generar pronósticos.")

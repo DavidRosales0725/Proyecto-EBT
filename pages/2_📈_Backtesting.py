@@ -1,11 +1,5 @@
 import streamlit as st
 
-st.title("📈 Backtesting")
-
-st.info("Aquí se mostrarán las métricas del motor.")
-
-st.metric("ROI", "--")
-
-st.metric("Brier Score", "--")
-
-st.metric("Yield", "--")
+st.set_page_config(page_title="EBT · Vista desactivada", page_icon="⚽", layout="wide")
+st.title("Backtesting")
+st.info("Esta vista se desactivó durante la simplificación de EBT. Usa la Prediction Card de la página principal para generar pronósticos.")
