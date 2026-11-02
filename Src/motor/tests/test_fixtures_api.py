@@ -4,8 +4,13 @@ import pytest
 import requests
 
 from motor.adapters.fixtures_api import (
+    COMPETICIONES_GRATUITAS,
     FixturesAPIError,
     FootballDataClient,
+    TIEMPO_CACHE_CLASIFICACION_SEGUNDOS,
+    TIEMPO_CACHE_FIXTURES_SEGUNDOS,
+    _obtener_clasificacion_cacheada,
+    _obtener_fixtures_cacheado,
     normalizar_fixtures,
     normalizar_historicos,
 )
@@ -117,7 +122,52 @@ def test_normaliza_historicos_finalizados_a_esquema_del_motor():
          "score": {"fullTime": {"home": None, "away": None}}},
     ]}
     historico = normalizar_historicos(payload)
-    assert list(historico.columns) == ["fecha", "equipo_local", "equipo_visitante", "goles_local", "goles_visitante"]
+    assert list(historico.columns) == ["fecha", "_temporada", "equipo_local", "equipo_visitante", "goles_local", "goles_visitante"]
     assert len(historico) == 1
     assert historico.iloc[0]["equipo_local"] == "Arsenal"
     assert historico.iloc[0]["goles_local"] == 2
+
+
+def test_mapeo_incluye_competiciones_gratuitas_internacionales():
+    assert COMPETICIONES_GRATUITAS["UEFA Champions League"]["codigo"] == "CL"
+    assert COMPETICIONES_GRATUITAS["Brasileirão Série A"]["codigo"] == "BSA"
+    assert "FIFA World Cup" not in COMPETICIONES_GRATUITAS
+    assert "Eurocopa" not in COMPETICIONES_GRATUITAS
+    assert len(COMPETICIONES_GRATUITAS) == 10
+
+
+def test_consulta_clasificacion_usa_endpoint_y_season():
+    sesion = _SesionFalsa([_Respuesta(200, {"standings": []})])
+    cliente = FootballDataClient("token", session=sesion, max_retries=0)
+    assert cliente.obtener_clasificacion("CL", 2026)["standings"] == []
+    url, argumentos = sesion.llamadas[0]
+    assert url.endswith("/competitions/CL/standings")
+    assert argumentos["params"] == {"season": 2026}
+
+
+def test_cachea_fixtures_y_clasificacion_positivos(monkeypatch):
+    llamadas = {"fixtures": 0, "clasificacion": 0}
+
+    def fixtures(self, competicion, desde, hasta):
+        llamadas["fixtures"] += 1
+        return {"matches": [{"status": "TIMED", "id": 1}]}
+
+    def clasificacion(self, competicion, temporada=None):
+        llamadas["clasificacion"] += 1
+        return {"standings": [{"table": []}]}
+
+    monkeypatch.setattr(FootballDataClient, "obtener_partidos", fixtures)
+    monkeypatch.setattr(FootballDataClient, "obtener_clasificacion", clasificacion)
+    _obtener_fixtures_cacheado.clear()
+    _obtener_clasificacion_cacheada.clear()
+    try:
+        _obtener_fixtures_cacheado("CL", "2026-11-01", "2026-11-08", "token", "token-hash")
+        _obtener_fixtures_cacheado("CL", "2026-11-01", "2026-11-08", "token", "token-hash")
+        _obtener_clasificacion_cacheada("CL", 2026, "token", "token-hash")
+        _obtener_clasificacion_cacheada("CL", 2026, "token", "token-hash")
+        assert llamadas == {"fixtures": 1, "clasificacion": 1}
+    finally:
+        _obtener_fixtures_cacheado.clear()
+        _obtener_clasificacion_cacheada.clear()
+    assert TIEMPO_CACHE_FIXTURES_SEGUNDOS >= 6 * 3600
+    assert TIEMPO_CACHE_CLASIFICACION_SEGUNDOS == 24 * 3600

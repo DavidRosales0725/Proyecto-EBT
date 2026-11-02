@@ -22,6 +22,23 @@ class FixtureProximo:
     liga: str = ""
 
 
+def mascara_partidos_anteriores(historico: pd.DataFrame, fecha_limite: object) -> pd.Series:
+    """Máscara cronológica segura ante fechas naive, UTC o distintos dtypes pandas.
+
+    La comparación se hace por fecha UTC, acorde con la granularidad de fixture
+    que usa la Prediction Card, evitando comparar datetime64 con Timestamp tz-aware.
+    """
+    if "fecha" not in historico.columns:
+        raise ValueError("El histórico no contiene la columna fecha")
+    fechas = pd.to_datetime(historico["fecha"], errors="coerce", utc=True).dt.date
+    limite = pd.Timestamp(fecha_limite)
+    if pd.isna(limite):
+        raise ValueError("La fecha límite del partido no es válida")
+    if limite.tzinfo is not None:
+        limite = limite.tz_convert("UTC")
+    return fechas < limite.date()
+
+
 def normalizar_fixture(fixture: FixtureProximo | Mapping[str, object]) -> FixtureProximo:
     """Acepta el objeto interno o un registro con nombres comunes de columnas."""
     if isinstance(fixture, Mapping):

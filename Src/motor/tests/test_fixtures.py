@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from motor.fixtures import FixtureProximo, normalizar_fixture, pronosticar_fixture
+from motor.fixtures import FixtureProximo, mascara_partidos_anteriores, normalizar_fixture, pronosticar_fixture
 from motor.team_names import normalizar_nombre_equipo
 
 
@@ -55,3 +55,11 @@ def test_fixture_sin_equipo_historico_da_aviso_controlado():
         pronosticar_fixture(
             FixtureProximo("Arsenal", "Chelsa", "2025-01-01"), _historico_equipos()
         )
+
+
+def test_mascara_fechas_acepta_datetime64_naive_y_fixture_utc():
+    historico = pd.DataFrame({
+        "fecha": pd.to_datetime(["2026-10-30", "2026-10-31", "2026-11-01"]).astype("datetime64[us]")
+    })
+    mascara = mascara_partidos_anteriores(historico, "2026-11-01T15:00:00+00:00")
+    assert mascara.tolist() == [True, True, False]

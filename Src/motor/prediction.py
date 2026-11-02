@@ -19,6 +19,72 @@ from .core.poisson_model import calcular_1x2, calcular_matriz_marcadores, calcul
 from .core.pesos import DEFAULT_ALPHA, promedio_ponderado
 from .team_names import normalizar_nombre_equipo
 
+PESO_TEMPORADA_ACTUAL_INICIAL = 0.70
+PARTIDOS_PARA_PESO_ACTUAL_COMPLETO = 8
+XG_MINIMO = 0.05
+XG_MAXIMO = 3.5
+
+
+def peso_temporada_actual(partidos_actuales: int, *, peso_inicial: float = PESO_TEMPORADA_ACTUAL_INICIAL,
+                          partidos_objetivo: int = PARTIDOS_PARA_PESO_ACTUAL_COMPLETO) -> float:
+    """Peso de temporada actual: 70% al principio y 100% desde el octavo partido.
+
+    Con cero partidos actuales el peso es cero, así no se descartan los datos previos.
+    """
+    if partidos_actuales < 0 or partidos_objetivo < 1 or not 0 <= peso_inicial <= 1:
+        raise ValueError("Configuración de ponderación de temporadas inválida")
+    if partidos_actuales == 0:
+        return 0.0
+    return min(1.0, peso_inicial + (1.0 - peso_inicial) * min(partidos_actuales / partidos_objetivo, 1.0))
+
+
+def normalizar_xg(valor: float, promedio_liga: float = 1.35) -> float:
+    """Acota xG a valores profesionales plausibles y reemplaza resultados no finitos."""
+    referencia = promedio_liga if np.isfinite(promedio_liga) and promedio_liga > 0 else 1.35
+    if not np.isfinite(valor):
+        valor = referencia
+    return float(np.clip(valor, XG_MINIMO, XG_MAXIMO))
+
+
+def evaluar_confianza(
+    partidos_local_actual: int,
+    partidos_visitante_actual: int,
+    *,
+    partidos_local_anterior: int = 0,
+    partidos_visitante_anterior: int = 0,
+) -> dict[str, str]:
+    """Clasifica cobertura por el rol con menos partidos de la temporada actual."""
+    conteos = (partidos_local_actual, partidos_visitante_actual,
+               partidos_local_anterior, partidos_visitante_anterior)
+    if any(conteo < 0 for conteo in conteos):
+        raise ValueError("La cobertura no puede ser negativa")
+    cobertura_actual = min(partidos_local_actual, partidos_visitante_actual)
+    cobertura_anterior = min(partidos_local_anterior, partidos_visitante_anterior)
+    if cobertura_actual >= PARTIDOS_PARA_PESO_ACTUAL_COMPLETO:
+        nivel, icono = "Alta", "✅"
+        detalle = (
+            f"Basado en {partidos_local_actual} partidos actuales del local y "
+            f"{partidos_visitante_actual} del visitante"
+        )
+    elif cobertura_actual >= 4:
+        nivel, icono = "Moderada", "ℹ️"
+        detalle = "Ponderación parcial de temporada actual"
+    else:
+        nivel, icono = "Baja", "⚠️"
+        detalle = (
+            "Muestra pequeña combinada con histórico anterior"
+            if cobertura_anterior else "Muestra pequeña de la temporada actual"
+        )
+    return {
+        "nivel": nivel,
+        "icono": icono,
+        "detalle": detalle,
+        "partidos_local_actual": str(partidos_local_actual),
+        "partidos_visitante_actual": str(partidos_visitante_actual),
+        "partidos_local_anterior": str(partidos_local_anterior),
+        "partidos_visitante_anterior": str(partidos_visitante_anterior),
+    }
+
 
 def _cachear_prediccion(funcion):
     """Cachea solo resultados correctos; las excepciones no quedan guardadas."""
@@ -50,6 +116,11 @@ class PronosticoPartido:
     iteraciones: int
     partidos_local: int
     partidos_visitante: int
+    partidos_local_temporada_actual: int = 0
+    partidos_visitante_temporada_actual: int = 0
+    partidos_local_temporada_anterior: int = 0
+    partidos_visitante_temporada_anterior: int = 0
+    temporadas_combinadas: bool = False
     advertencias: tuple[str, ...] = ()
 
 
@@ -61,6 +132,7 @@ def _ponderar_ajuste_rival(
     contra_columna: str,
     alpha: float,
     promedio_liga: float,
+    temporada_actual: int | None = None,
 ) -> tuple[float, float]:
     ataque_ajustado = []
     defensa_ajustada = []
@@ -70,9 +142,35 @@ def _ponderar_ajuste_rival(
         fuerza_ataque_rival = ataque_rival.get(rival, 1.0)
         ataque_ajustado.append(float(getattr(partido, ataque_columna)) / max(fuerza_defensa_rival, 0.25))
         defensa_ajustada.append(float(getattr(partido, contra_columna)) / max(fuerza_ataque_rival, 0.25))
+    if temporada_actual is None or "_temporada" not in muestra.columns:
+        return (
+            promedio_ponderado(ataque_ajustado, alpha) if ataque_ajustado else promedio_liga,
+            promedio_ponderado(defensa_ajustada, alpha) if defensa_ajustada else promedio_liga,
+        )
+
+    def media_temporal(valores: list[float]) -> float:
+        temporadas = muestra["_temporada"].astype("Int64")
+        actual = temporadas.eq(temporada_actual).fillna(False).to_numpy()
+        n_actual = int(actual.sum())
+        anteriores = ~actual
+        n_anterior = int(anteriores.sum())
+        if not n_anterior:
+            return promedio_ponderado(valores, alpha)
+        if not n_actual:
+            return promedio_ponderado(valores, alpha)
+        parte_actual = peso_temporada_actual(n_actual)
+        serie = np.asarray(valores, dtype=float)
+        pesos_recencia = np.power(alpha, np.arange(len(serie) - 1, -1, -1, dtype=float))
+        medias = []
+        for mascara in (actual, anteriores):
+            pesos = pesos_recencia[mascara]
+            pesos = pesos / pesos.sum()
+            medias.append(float(np.average(serie[mascara], weights=pesos)))
+        return parte_actual * medias[0] + (1.0 - parte_actual) * medias[1]
+
     return (
-        promedio_ponderado(ataque_ajustado, alpha) if ataque_ajustado else promedio_liga,
-        promedio_ponderado(defensa_ajustada, alpha) if defensa_ajustada else promedio_liga,
+        media_temporal(ataque_ajustado) if ataque_ajustado else promedio_liga,
+        media_temporal(defensa_ajustada) if defensa_ajustada else promedio_liga,
     )
 
 
@@ -108,7 +206,12 @@ def predecir_partido(
     corte = pd.Timestamp(fecha_partido)
     if corte.tzinfo is not None:
         corte = corte.tz_localize(None)
-    df = historico.loc[historico["fecha"] < corte].copy()
+    df = historico.copy()
+    df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce", utc=True).dt.tz_localize(None)
+    for columna in ("goles_local", "goles_visitante"):
+        df[columna] = pd.to_numeric(df[columna], errors="coerce")
+    df = df.dropna(subset=["fecha", "goles_local", "goles_visitante"])
+    df = df.loc[df["fecha"] < corte].copy()
     local = normalizar_nombre_equipo(equipo_local)
     visitante = normalizar_nombre_equipo(equipo_visitante)
     if not local or not visitante or local == visitante:
@@ -142,6 +245,9 @@ def predecir_partido(
     defensa_rival = ((ratings["ga"] + prior * promedio_liga) /
                      ((ratings["partidos"] + prior) * promedio_liga)).to_dict()
 
+    temporada_actual = _temporada_partido(pd.Timestamp(fecha_partido))
+    if "_temporada" not in df.columns:
+        df["_temporada"] = df["fecha"].map(_temporada_partido)
     muestra_local = df.loc[df["equipo_local"].eq(local)].tail(ventana)
     muestra_visitante = df.loc[df["equipo_visitante"].eq(visitante)].tail(ventana)
     if muestra_local.empty:
@@ -152,13 +258,17 @@ def predecir_partido(
     ataque_local, defensa_local = _ponderar_ajuste_rival(
         muestra_local, ataque_rival, defensa_rival,
         "goles_local", "goles_visitante", alpha, promedio_liga,
+        temporada_actual,
     )
     ataque_visitante, defensa_visitante = _ponderar_ajuste_rival(
         muestra_visitante, ataque_rival, defensa_rival,
         "goles_visitante", "goles_local", alpha, promedio_liga,
+        temporada_actual,
     )
-    lamb_local = float(np.clip(ataque_local * defensa_visitante / promedio_liga, 0.05, 5.0))
-    lamb_visitante = float(np.clip(ataque_visitante * defensa_local / promedio_liga, 0.05, 5.0))
+    lambda_local_bruto = ataque_local * defensa_visitante / promedio_liga
+    lambda_visitante_bruto = ataque_visitante * defensa_local / promedio_liga
+    lamb_local = normalizar_xg(lambda_local_bruto, promedio_liga)
+    lamb_visitante = normalizar_xg(lambda_visitante_bruto, promedio_liga)
     goles = GolesEsperados(lamb_local, lamb_visitante)
 
     mercados = calcular_probabilidades(goles)
@@ -176,11 +286,27 @@ def predecir_partido(
     marcador, conteo = Counter(zip(marcadores_local.tolist(), marcadores_visitante.tolist())).most_common(1)[0]
 
     advertencias = []
+    if lambda_local_bruto > XG_MAXIMO or lambda_visitante_bruto > XG_MAXIMO:
+        advertencias.append(
+            f"Un xG bruto superó el límite preventivo de {XG_MAXIMO:.1f}; se acotó para evitar una proyección extrema."
+        )
     if len(muestra_local) < ventana:
         advertencias.append(f"{local}: {len(muestra_local)} partidos recientes como local disponibles.")
     if len(muestra_visitante) < ventana:
         advertencias.append(f"{visitante}: {len(muestra_visitante)} partidos recientes como visitante disponibles.")
 
+    temporadas_combinadas = (
+        df["_temporada"].nunique(dropna=True) > 1
+        and
+        (muestra_local["_temporada"].nunique(dropna=True) > 1
+         or muestra_visitante["_temporada"].nunique(dropna=True) > 1)
+    )
+    temporadas_local = muestra_local["_temporada"].astype("Int64")
+    temporadas_visitante = muestra_visitante["_temporada"].astype("Int64")
+    partidos_local_actual = int(temporadas_local.eq(temporada_actual).fillna(False).sum())
+    partidos_visitante_actual = int(temporadas_visitante.eq(temporada_actual).fillna(False).sum())
+    partidos_local_anterior = int(temporadas_local.lt(temporada_actual).fillna(False).sum())
+    partidos_visitante_anterior = int(temporadas_visitante.lt(temporada_actual).fillna(False).sum())
     return PronosticoPartido(
         equipo_local=local,
         equipo_visitante=visitante,
@@ -203,5 +329,15 @@ def predecir_partido(
         iteraciones=iteraciones,
         partidos_local=len(muestra_local),
         partidos_visitante=len(muestra_visitante),
+        partidos_local_temporada_actual=partidos_local_actual,
+        partidos_visitante_temporada_actual=partidos_visitante_actual,
+        partidos_local_temporada_anterior=partidos_local_anterior,
+        partidos_visitante_temporada_anterior=partidos_visitante_anterior,
+        temporadas_combinadas=temporadas_combinadas,
         advertencias=tuple(advertencias),
     )
+
+
+def _temporada_partido(valor: object) -> int:
+    fecha = pd.Timestamp(valor)
+    return fecha.year if fecha.month >= 7 else fecha.year - 1

@@ -35,8 +35,10 @@ if load_dotenv is not None:
     load_dotenv(_ROOT / ".env", override=False)
 
 BASE_URL = "https://api.football-data.org/v4"
-TIEMPO_CACHE_SEGUNDOS = 3600
+TIEMPO_CACHE_FIXTURES_SEGUNDOS = 6 * 3600
 TIEMPO_CACHE_HISTORICOS_SEGUNDOS = 6 * 3600
+TIEMPO_CACHE_CLASIFICACION_SEGUNDOS = 24 * 3600
+# Subconjunto de competiciones gratuitas apropiadas para el flujo regular de EBT.
 COMPETICIONES_GRATUITAS = {
     "Premier League": {"codigo": "PL", "historico": "Premier League"},
     "LaLiga": {"codigo": "PD", "historico": "LaLiga"},
@@ -46,6 +48,8 @@ COMPETICIONES_GRATUITAS = {
     "Championship": {"codigo": "ELC", "historico": "Championship"},
     "Eredivisie": {"codigo": "DED", "historico": "Eredivisie"},
     "Primeira Liga": {"codigo": "PPL", "historico": "Primeira Liga"},
+    "UEFA Champions League": {"codigo": "CL", "historico": "UEFA Champions League"},
+    "Brasileirão Série A": {"codigo": "BSA", "historico": "Brasileirão Série A"},
 }
 
 
@@ -184,6 +188,48 @@ class FootballDataClient:
             return payload
         raise FixturesAPIError("No se pudieron obtener resultados históricos.") from ultimo_error
 
+    def obtener_clasificacion(self, competicion: str, temporada: int | None = None) -> dict[str, Any]:
+        """Consulta la tabla de clasificación vigente de una competición."""
+        codigo = competicion.strip().upper()
+        if not re.fullmatch(r"[A-Z0-9]{2,5}", codigo):
+            raise FixturesAPIError("Código de competición inválido.")
+        if temporada is not None and (not isinstance(temporada, int) or not 2000 <= temporada <= 2100):
+            raise FixturesAPIError("Temporada inválida.")
+        params = {"season": temporada} if temporada is not None else {}
+        url = f"{BASE_URL}/competitions/{codigo}/standings"
+        ultimo_error: Exception | None = None
+        for intento in range(self._max_retries + 1):
+            try:
+                respuesta = self._session.get(
+                    url, params=params, headers={"X-Auth-Token": self._token}, timeout=self._timeout
+                )
+            except requests.RequestException as exc:
+                ultimo_error = exc
+                if intento < self._max_retries:
+                    time.sleep(self._backoff_seconds * (2 ** intento))
+                    continue
+                raise FixturesAPIError("No se pudo conectar para cargar la clasificación.") from None
+            if respuesta.status_code == 429 or 500 <= respuesta.status_code < 600:
+                if intento < self._max_retries:
+                    time.sleep(_espera_reintento(respuesta, intento, self._backoff_seconds))
+                    continue
+            if respuesta.status_code in (401, 403):
+                raise FixturesAPIError("Football-Data.org rechazó el token o no habilitó esta clasificación.")
+            if respuesta.status_code == 429:
+                raise FixturesAPIError("Se alcanzó el límite temporal de Football-Data.org al consultar la clasificación.")
+            try:
+                respuesta.raise_for_status()
+                payload = respuesta.json()
+            except requests.HTTPError:
+                raise FixturesAPIError(f"Football-Data.org respondió con HTTP {respuesta.status_code} para la clasificación.") from None
+            except (ValueError, requests.JSONDecodeError):
+                raise FixturesAPIError("Football-Data.org devolvió una clasificación JSON inválida.") from None
+            if not isinstance(payload, dict) or not isinstance(payload.get("standings"), list):
+                raise FixturesAPIError("La respuesta no contiene tablas de clasificación válidas.")
+            payload["__ebt_fetched_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            return payload
+        raise FixturesAPIError("No se pudo obtener la clasificación.") from ultimo_error
+
 
 def _temporada_actual(codigo: str, hoy: date | None = None) -> int:
     """Año de inicio: temporada europea julio-junio, MLS año natural."""
@@ -282,10 +328,16 @@ def normalizar_historicos(payload: Mapping[str, Any]):
             continue
         if fecha.tzinfo is not None:
             fecha = fecha.tz_convert(None)
-        filas.append({"fecha": fecha, "equipo_local": nombre_local,
+        temporada_api = partido.get("season") or {}
+        temporada_api = temporada_api.get("startDate") if isinstance(temporada_api, Mapping) else None
+        try:
+            temporada = int(str(temporada_api)[:4]) if temporada_api else payload.get("__ebt_season")
+        except (TypeError, ValueError):
+            temporada = payload.get("__ebt_season")
+        filas.append({"fecha": fecha, "_temporada": temporada, "equipo_local": nombre_local,
                       "equipo_visitante": nombre_visitante, "goles_local": goles_local,
                       "goles_visitante": goles_visitante})
-    columnas = ["fecha", "equipo_local", "equipo_visitante", "goles_local", "goles_visitante"]
+    columnas = ["fecha", "_temporada", "equipo_local", "equipo_visitante", "goles_local", "goles_visitante"]
     return pd.DataFrame(filas, columns=columnas).sort_values("fecha", kind="stable").reset_index(drop=True)
 
 
@@ -302,18 +354,29 @@ def _obtener_fixtures_cacheado(
 
 def _obtener_historicos_cacheado_impl(competicion: str, temporada: int, _token: str, huella_token: str):
     del huella_token
-    return FootballDataClient(_token).obtener_historicos(competicion, temporada)
+    payload = FootballDataClient(_token).obtener_historicos(competicion, temporada)
+    payload["__ebt_fetched_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return payload
+
+
+def _obtener_clasificacion_cacheado_impl(competicion: str, temporada: int | None, _token: str, huella_token: str):
+    del huella_token
+    return FootballDataClient(_token).obtener_clasificacion(competicion, temporada)
 
 
 if st is not None:
     _obtener_fixtures_cacheado = st.cache_data(
-        ttl=TIEMPO_CACHE_SEGUNDOS, show_spinner=False
+        ttl=TIEMPO_CACHE_FIXTURES_SEGUNDOS, show_spinner=False
     )(_obtener_fixtures_cacheado)
     _obtener_historicos_cacheado = st.cache_data(
         ttl=TIEMPO_CACHE_HISTORICOS_SEGUNDOS, show_spinner=False
     )(_obtener_historicos_cacheado_impl)
+    _obtener_clasificacion_cacheada = st.cache_data(
+        ttl=TIEMPO_CACHE_CLASIFICACION_SEGUNDOS, show_spinner=False
+    )(_obtener_clasificacion_cacheado_impl)
 else:
     _obtener_historicos_cacheado = _obtener_historicos_cacheado_impl
+    _obtener_clasificacion_cacheada = _obtener_clasificacion_cacheado_impl
 
 
 def obtener_fixtures_proximos(
@@ -333,6 +396,15 @@ def obtener_fixtures_proximos(
     return normalizar_fixtures(payload)
 
 
+def obtener_clasificacion(competicion: str, *, temporada: int | None = None, token: str | None = None) -> dict[str, Any]:
+    """Devuelve la clasificación vigente; se reutiliza localmente durante 24 horas."""
+    api_token = (token or leer_token_api() or "").strip()
+    if not api_token:
+        raise FixturesAPIError("FOOTBALL_DATA_API_KEY no está configurado.")
+    huella = hashlib.sha256(api_token.encode("utf-8")).hexdigest()
+    return _obtener_clasificacion_cacheada(competicion, temporada, api_token, huella)
+
+
 def obtener_historicos_temporada(competicion: str, *, temporada: int | None = None, token: str | None = None):
     """Históricos de temporada canónicos; la respuesta correcta vive seis horas en caché."""
     api_token = (token or leer_token_api() or "").strip()
@@ -340,5 +412,9 @@ def obtener_historicos_temporada(competicion: str, *, temporada: int | None = No
         raise FixturesAPIError("FOOTBALL_DATA_API_KEY no está configurado.")
     temporada = temporada or _temporada_actual(competicion.strip().upper())
     huella = hashlib.sha256(api_token.encode("utf-8")).hexdigest()
-    payload = _obtener_historicos_cacheado(competicion, temporada, api_token, huella)
-    return normalizar_historicos(payload)
+    payload = dict(_obtener_historicos_cacheado(competicion, temporada, api_token, huella))
+    payload["__ebt_season"] = temporada
+    dataframe = normalizar_historicos(payload)
+    dataframe.attrs["actualizado_en"] = payload.get("__ebt_fetched_at")
+    dataframe.attrs["temporada"] = temporada
+    return dataframe
