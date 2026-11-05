@@ -15,12 +15,13 @@ except ModuleNotFoundError:  # el motor también se ejecuta en scripts y pruebas
     st = None
 
 from .core.expected_goals import GolesEsperados
-from .core.poisson_model import calcular_1x2, calcular_matriz_marcadores, calcular_probabilidades
-from .core.pesos import DEFAULT_ALPHA, promedio_ponderado
+from .core.pesos import promedio_ponderado
 from .team_names import normalizar_nombre_equipo
 
 PESO_TEMPORADA_ACTUAL_INICIAL = 0.70
 PARTIDOS_PARA_PESO_ACTUAL_COMPLETO = 8
+DECAY_TEMPORAL = 0.95
+SIMULACIONES_DEFAULT = 10_000
 XG_MINIMO = 0.05
 XG_MAXIMO = 3.5
 
@@ -86,6 +87,48 @@ def evaluar_confianza(
     }
 
 
+def generar_recomendaciones(
+    probabilidades: dict[str, float],
+    lambda_local: float,
+    lambda_visitante: float,
+    partidos_local_actual: int,
+    partidos_visitante_actual: int,
+) -> tuple[dict[str, str], ...]:
+    """Emite picks solo con probabilidad, xG y cobertura de temporada suficientes."""
+    cobertura = min(partidos_local_actual, partidos_visitante_actual)
+    if cobertura < 6:
+        return ()
+
+    picks: list[dict[str, str]] = []
+    opciones_1x2 = [
+        ("Victoria local", probabilidades["local"]),
+        ("Empate", probabilidades["empate"]),
+        ("Victoria visitante", probabilidades["visitante"]),
+    ]
+    mercado, probabilidad = max(opciones_1x2, key=lambda item: item[1])
+    if probabilidad >= 0.60:
+        picks.append({"mercado": "Ganador 1X2", "seleccion": mercado,
+                      "probabilidad": f"{probabilidad:.1%}", "confianza": "Alta" if cobertura >= 8 else "Moderada"})
+
+    total_xg = lambda_local + lambda_visitante
+    if total_xg >= 2.8 and probabilidades["over_25"] >= 0.65:
+        picks.append({"mercado": "Más de 2.5 goles", "seleccion": "Over 2.5",
+                      "probabilidad": f"{probabilidades['over_25']:.1%}", "confianza": "Alta" if cobertura >= 8 else "Moderada"})
+    elif total_xg <= 2.2 and probabilidades["under_25"] >= 0.65:
+        picks.append({"mercado": "Menos de 2.5 goles", "seleccion": "Under 2.5",
+                      "probabilidad": f"{probabilidades['under_25']:.1%}", "confianza": "Alta" if cobertura >= 8 else "Moderada"})
+
+    if (lambda_local >= 1.0 and lambda_visitante >= 1.0
+            and probabilidades["btts_si"] >= 0.65):
+        picks.append({"mercado": "Ambos anotan", "seleccion": "Sí · BTTS",
+                      "probabilidad": f"{probabilidades['btts_si']:.1%}", "confianza": "Alta" if cobertura >= 8 else "Moderada"})
+    elif (min(lambda_local, lambda_visitante) <= 0.8
+          and probabilidades["btts_no"] >= 0.65):
+        picks.append({"mercado": "Ambos anotan", "seleccion": "No · BTTS",
+                      "probabilidad": f"{probabilidades['btts_no']:.1%}", "confianza": "Alta" if cobertura >= 8 else "Moderada"})
+    return tuple(picks)
+
+
 def _cachear_prediccion(funcion):
     """Cachea solo resultados correctos; las excepciones no quedan guardadas."""
     if st is None:
@@ -121,6 +164,7 @@ class PronosticoPartido:
     partidos_local_temporada_anterior: int = 0
     partidos_visitante_temporada_anterior: int = 0
     temporadas_combinadas: bool = False
+    recomendaciones: tuple[dict[str, str], ...] = ()
     advertencias: tuple[str, ...] = ()
 
 
@@ -132,7 +176,6 @@ def _ponderar_ajuste_rival(
     contra_columna: str,
     alpha: float,
     promedio_liga: float,
-    temporada_actual: int | None = None,
 ) -> tuple[float, float]:
     ataque_ajustado = []
     defensa_ajustada = []
@@ -142,35 +185,12 @@ def _ponderar_ajuste_rival(
         fuerza_ataque_rival = ataque_rival.get(rival, 1.0)
         ataque_ajustado.append(float(getattr(partido, ataque_columna)) / max(fuerza_defensa_rival, 0.25))
         defensa_ajustada.append(float(getattr(partido, contra_columna)) / max(fuerza_ataque_rival, 0.25))
-    if temporada_actual is None or "_temporada" not in muestra.columns:
-        return (
-            promedio_ponderado(ataque_ajustado, alpha) if ataque_ajustado else promedio_liga,
-            promedio_ponderado(defensa_ajustada, alpha) if defensa_ajustada else promedio_liga,
-        )
-
-    def media_temporal(valores: list[float]) -> float:
-        temporadas = muestra["_temporada"].astype("Int64")
-        actual = temporadas.eq(temporada_actual).fillna(False).to_numpy()
-        n_actual = int(actual.sum())
-        anteriores = ~actual
-        n_anterior = int(anteriores.sum())
-        if not n_anterior:
-            return promedio_ponderado(valores, alpha)
-        if not n_actual:
-            return promedio_ponderado(valores, alpha)
-        parte_actual = peso_temporada_actual(n_actual)
-        serie = np.asarray(valores, dtype=float)
-        pesos_recencia = np.power(alpha, np.arange(len(serie) - 1, -1, -1, dtype=float))
-        medias = []
-        for mascara in (actual, anteriores):
-            pesos = pesos_recencia[mascara]
-            pesos = pesos / pesos.sum()
-            medias.append(float(np.average(serie[mascara], weights=pesos)))
-        return parte_actual * medias[0] + (1.0 - parte_actual) * medias[1]
-
+    # La muestra está ordenada del partido más antiguo al más reciente. La
+    # fecha de temporada no recorta el historial: toda la temporada actual y
+    # las anteriores contribuyen con decaimiento exponencial por antigüedad.
     return (
-        media_temporal(ataque_ajustado) if ataque_ajustado else promedio_liga,
-        media_temporal(defensa_ajustada) if defensa_ajustada else promedio_liga,
+        promedio_ponderado(ataque_ajustado, alpha) if ataque_ajustado else promedio_liga,
+        promedio_ponderado(defensa_ajustada, alpha) if defensa_ajustada else promedio_liga,
     )
 
 
@@ -182,17 +202,15 @@ def predecir_partido(
     fecha_partido: date | str,
     *,
     ventana: int = 20,
-    alpha: float = DEFAULT_ALPHA,
-    iteraciones: int = 1000,
+    alpha: float = DECAY_TEMPORAL,
+    iteraciones: int = SIMULACIONES_DEFAULT,
 ) -> PronosticoPartido:
     """Estima mercados Poisson y simula marcadores para una selección.
 
-    La ventana usa hasta ``ventana`` partidos recientes del equipo en su rol
-    (local/visitante). Los goles se ajustan por la fuerza global observada de
-    ataque y defensa de cada rival antes de la fecha del pronóstico.
+    Usa todos los partidos previos de cada equipo en su rol. ``ventana`` se
+    conserva por compatibilidad con clientes anteriores, pero ya no recorta
+    la muestra. La recencia se pondera con ``alpha`` (0.95 por defecto).
     """
-    if not 10 <= ventana <= 30:
-        raise ValueError("La ventana de recencia debe estar entre 10 y 30 partidos")
     if not np.isfinite(alpha) or not 0 < alpha <= 1:
         raise ValueError("alpha debe estar en el rango (0, 1]")
     if not isinstance(iteraciones, int) or iteraciones < 1:
@@ -248,8 +266,8 @@ def predecir_partido(
     temporada_actual = _temporada_partido(pd.Timestamp(fecha_partido))
     if "_temporada" not in df.columns:
         df["_temporada"] = df["fecha"].map(_temporada_partido)
-    muestra_local = df.loc[df["equipo_local"].eq(local)].tail(ventana)
-    muestra_visitante = df.loc[df["equipo_visitante"].eq(visitante)].tail(ventana)
+    muestra_local = df.loc[df["equipo_local"].eq(local)]
+    muestra_visitante = df.loc[df["equipo_visitante"].eq(visitante)]
     if muestra_local.empty:
         raise ValueError(f"No hay histórico reciente de {local} como local en esta liga")
     if muestra_visitante.empty:
@@ -258,12 +276,10 @@ def predecir_partido(
     ataque_local, defensa_local = _ponderar_ajuste_rival(
         muestra_local, ataque_rival, defensa_rival,
         "goles_local", "goles_visitante", alpha, promedio_liga,
-        temporada_actual,
     )
     ataque_visitante, defensa_visitante = _ponderar_ajuste_rival(
         muestra_visitante, ataque_rival, defensa_rival,
         "goles_visitante", "goles_local", alpha, promedio_liga,
-        temporada_actual,
     )
     lambda_local_bruto = ataque_local * defensa_visitante / promedio_liga
     lambda_visitante_bruto = ataque_visitante * defensa_local / promedio_liga
@@ -271,18 +287,27 @@ def predecir_partido(
     lamb_visitante = normalizar_xg(lambda_visitante_bruto, promedio_liga)
     goles = GolesEsperados(lamb_local, lamb_visitante)
 
-    mercados = calcular_probabilidades(goles)
-    matriz_1x2 = calcular_matriz_marcadores(goles, max_goles=12)
-    probs_1x2 = calcular_1x2(matriz_1x2)
-    suma_1x2 = sum(probs_1x2.values())
-    if suma_1x2 > 0:
-        probs_1x2 = {nombre: valor / suma_1x2 for nombre, valor in probs_1x2.items()}
-
-    seed_text = f"{local}|{visitante}|{pd.Timestamp(fecha_partido).date()}|{ventana}|{alpha}"
+    seed_text = f"{local}|{visitante}|{pd.Timestamp(fecha_partido).date()}|{alpha}|{iteraciones}"
     seed = int.from_bytes(hashlib.sha256(seed_text.encode("utf-8")).digest()[:8], "little")
     rng = np.random.default_rng(seed)
     marcadores_local = rng.poisson(lamb_local, size=iteraciones)
     marcadores_visitante = rng.poisson(lamb_visitante, size=iteraciones)
+    probs_1x2 = {
+        "local": float(np.mean(marcadores_local > marcadores_visitante)),
+        "empate": float(np.mean(marcadores_local == marcadores_visitante)),
+        "visitante": float(np.mean(marcadores_local < marcadores_visitante)),
+    }
+    goles_totales = marcadores_local + marcadores_visitante
+    over_15 = float(np.mean(goles_totales >= 2))
+    over_25 = float(np.mean(goles_totales >= 3))
+    over_35 = float(np.mean(goles_totales >= 4))
+    btts_si = float(np.mean((marcadores_local > 0) & (marcadores_visitante > 0)))
+    mercados = {
+        "over_15": over_15, "under_15": 1 - over_15,
+        "over_25": over_25, "under_25": 1 - over_25,
+        "over_35": over_35, "under_35": 1 - over_35,
+        "btts_si": btts_si, "btts_no": 1 - btts_si,
+    }
     marcador, conteo = Counter(zip(marcadores_local.tolist(), marcadores_visitante.tolist())).most_common(1)[0]
 
     advertencias = []
@@ -290,10 +315,10 @@ def predecir_partido(
         advertencias.append(
             f"Un xG bruto superó el límite preventivo de {XG_MAXIMO:.1f}; se acotó para evitar una proyección extrema."
         )
-    if len(muestra_local) < ventana:
-        advertencias.append(f"{local}: {len(muestra_local)} partidos recientes como local disponibles.")
-    if len(muestra_visitante) < ventana:
-        advertencias.append(f"{visitante}: {len(muestra_visitante)} partidos recientes como visitante disponibles.")
+    if len(muestra_local) < 8:
+        advertencias.append(f"{local}: se usan todos sus {len(muestra_local)} partidos disponibles como local.")
+    if len(muestra_visitante) < 8:
+        advertencias.append(f"{visitante}: se usan todos sus {len(muestra_visitante)} partidos disponibles como visitante.")
 
     temporadas_combinadas = (
         df["_temporada"].nunique(dropna=True) > 1
@@ -316,14 +341,14 @@ def predecir_partido(
         victoria_local=float(probs_1x2["local"]),
         empate=float(probs_1x2["empate"]),
         victoria_visitante=float(probs_1x2["visitante"]),
-        btts_si=float(mercados.btts_si),
-        btts_no=float(mercados.btts_no),
-        over_15=float(mercados.over_15),
-        under_15=float(mercados.under_15),
-        over_25=float(mercados.over_25),
-        under_25=float(mercados.under_25),
-        over_35=float(mercados.over_35),
-        under_35=float(mercados.under_35),
+        btts_si=float(mercados["btts_si"]),
+        btts_no=float(mercados["btts_no"]),
+        over_15=float(mercados["over_15"]),
+        under_15=float(mercados["under_15"]),
+        over_25=float(mercados["over_25"]),
+        under_25=float(mercados["under_25"]),
+        over_35=float(mercados["over_35"]),
+        under_35=float(mercados["under_35"]),
         marcador_simulado=f"{marcador[0]}–{marcador[1]}",
         frecuencia_marcador_simulado=float(conteo / iteraciones),
         iteraciones=iteraciones,
@@ -334,6 +359,12 @@ def predecir_partido(
         partidos_local_temporada_anterior=partidos_local_anterior,
         partidos_visitante_temporada_anterior=partidos_visitante_anterior,
         temporadas_combinadas=temporadas_combinadas,
+        recomendaciones=generar_recomendaciones(
+            {**probs_1x2, "over_25": mercados["over_25"], "under_25": mercados["under_25"],
+             "btts_si": mercados["btts_si"], "btts_no": mercados["btts_no"]},
+            float(lamb_local), float(lamb_visitante),
+            partidos_local_actual, partidos_visitante_actual,
+        ),
         advertencias=tuple(advertencias),
     )
 

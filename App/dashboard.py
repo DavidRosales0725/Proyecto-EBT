@@ -283,15 +283,13 @@ def _pronostico_cacheado(
     local: str,
     visitante: str,
     fecha_partido: str,
-    ventana: int,
     firmas: tuple[tuple[str, int, int], ...],
     _historico: pd.DataFrame,
 ):
     return pronosticar_fixture(
         FixtureProximo(local, visitante, fecha_partido, liga),
         _historico,
-        ventana=ventana,
-        iteraciones=1000,
+        iteraciones=10_000,
     )
 
 
@@ -439,10 +437,7 @@ def render_prediction_card() -> None:
             fecha_partido = fila1[1].date_input(
                 "Fecha del partido", value=hoy_bogota + timedelta(days=1), key="prediction_manual_date"
             )
-            ventana = fila1[2].slider(
-                "Partidos recientes por rol", min_value=10, max_value=30, value=20, step=1,
-                help="Se toman los partidos más recientes disponibles como local o visitante.",
-            )
+            fila1[2].markdown("**Datos:** temporada completa + histórico")
             firmas = _firmas_liga(catalogo[liga])
             historico, errores_carga = _cargar_historicos(firmas)
             fuente_datos = "CSV local"
@@ -469,11 +464,7 @@ def render_prediction_card() -> None:
         historico = historico_api
         errores_carga = errores_api_hist
         firmas = firmas_api
-        ventana = st.slider(
-            "Partidos recientes por rol", min_value=10, max_value=30, value=20, step=1,
-            help="Se toman los partidos más recientes disponibles como local o visitante.",
-            key="prediction_api_window",
-        )
+        st.caption("El modelo usa todos los partidos previos disponibles, ponderados por recencia.")
         fixture = fixture_api
         fecha_partido = pd.Timestamp(fixture.fecha).date()
 
@@ -500,7 +491,7 @@ def render_prediction_card() -> None:
     try:
         pronostico = _pronostico_cacheado(
             liga, fixture.equipo_local, fixture.equipo_visitante,
-            fecha_partido.isoformat(), ventana, firmas, historico,
+            fecha_partido.isoformat(), firmas, historico,
         )
     except Exception as exc:
         st.warning(f"No se pudo generar el pronóstico para esta selección: {exc}")
@@ -542,6 +533,19 @@ def render_prediction_card() -> None:
         c_empate.metric("Empate", f"{pronostico.empate:.1%}")
         c_visitante.metric("Victoria visitante", f"{pronostico.victoria_visitante:.1%}")
 
+        st.markdown("##### Recomendaciones del modelo")
+        if pronostico.recomendaciones:
+            columnas_recomendacion = st.columns(len(pronostico.recomendaciones))
+            for columna, recomendacion in zip(columnas_recomendacion, pronostico.recomendaciones):
+                columna.metric(
+                    f"✅ {recomendacion['mercado']}",
+                    recomendacion["seleccion"],
+                    delta=f"{recomendacion['probabilidad']} · Confianza {recomendacion['confianza']}",
+                    delta_color="off",
+                )
+        else:
+            st.info("Sin recomendación: se requiere más cobertura de temporada y una señal sólida de probabilidad y xG.")
+
         st.markdown("##### Ambos marcan · BTTS")
         c_si, c_no = st.columns(2)
         c_si.metric("Sí", f"{pronostico.btts_si:.1%}")
@@ -572,7 +576,7 @@ def render_prediction_card() -> None:
     else:
         actualizado_texto = "fecha no disponible"
     st.caption(
-        f"{ventana} partidos recientes por rol · {pronostico.partidos_local} muestras de local · "
+        f"Toda la temporada e histórico con decaimiento temporal · {pronostico.partidos_local} muestras de local · "
         f"{pronostico.partidos_visitante} muestras de visitante · "
         f"fuente: {fuente_datos} · actualizado: {actualizado_texto} · "
         f"histórico hasta {fecha_ultimo_historico:%d/%m/%Y}"
